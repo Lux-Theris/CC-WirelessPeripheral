@@ -98,10 +98,11 @@ end
 
 local audio_queues = {}
 local function pumpAudioQueues()
+    local current_time = os.epoch("ingame") / 1000
     for name, queue in pairs(audio_queues) do
         while #queue > 0 do
             local item = queue[1]
-            if item.play_at and os.clock() < item.play_at then
+            if item.play_at and current_time < item.play_at then
                 break -- Wait until the synchronized timestamp is reached
             end
             
@@ -186,42 +187,9 @@ local wrappedPeripheralApi = {
             end)
     end,
     wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume, play_at)
-        log("Multicast DFPWM call(".. _type ..", ".. methodName ..")")
-        if not _wpp_local_decoder then 
-            local dfpwm = require("cc.audio.dfpwm")
-            _wpp_local_decoder = dfpwm.make_decoder() 
-        end
-        local function decodeAsync()
-            local buffer = {}
-            local chunk_len = string.len(chunk)
-            local slice_size = 2000 -- Process 2KB at a time to prevent TPS crashes
-            
-            for i = 1, chunk_len, slice_size do
-                local slice = string.sub(chunk, i, math.min(i + slice_size - 1, chunk_len))
-                local decoded_slice = _wpp_local_decoder(slice)
-                for _, sample in ipairs(decoded_slice) do
-                    table.insert(buffer, sample)
-                end
-                os.queueEvent("wpp_decode_yield")
-                os.pullEvent("wpp_decode_yield")
-            end
-            
-            local locals = {nativePeripheral.find(_type)}
-            for i, loc in ipairs(locals) do
-                local name = nativePeripheral.getName(loc)
-                audio_queues[name] = audio_queues[name] or {}
-                table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume, play_at=play_at})
-            end
-            pumpAudioQueues()
-        end
-        
-        -- Run the async decoder without blocking the rednet listener
-        local coro = coroutine.create(decodeAsync)
-        coroutine.resume(coro)
-        
-        -- Register the coroutine so it can be pumped alongside standard events
-        _wpp_active_coroutines = _wpp_active_coroutines or {}
-        table.insert(_wpp_active_coroutines, coro)
+        _wpp_pending_decodes = _wpp_pending_decodes or {}
+        table.insert(_wpp_pending_decodes, {type=_type, methodName=methodName, chunk=chunk, volume=volume, play_at=play_at})
+        os.queueEvent("wpp_decode_next")
     end
 }
 -- End->Wrapped Peripheral API funtcions
@@ -244,22 +212,52 @@ function wireless.host(networkId)
     rednet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
 end
 
-function wireless.localEventHandler(event)
-    if event[1] == "speaker_audio_empty" or event[1] == "timer" then
-        pumpAudioQueues()
+local _wpp_decode_state = nil
+local function pumpDecoding()
+    if not _wpp_pending_decodes or #_wpp_pending_decodes == 0 then return end
+    
+    if not _wpp_local_decoder then 
+        local dfpwm = require("cc.audio.dfpwm")
+        _wpp_local_decoder = dfpwm.make_decoder() 
+    end
+
+    local task = _wpp_pending_decodes[1]
+    _wpp_decode_state = _wpp_decode_state or { i = 1, buffer = {} }
+    
+    local slice_size = 2000
+    local chunk_len = string.len(task.chunk)
+    local i = _wpp_decode_state.i
+    local slice = string.sub(task.chunk, i, math.min(i + slice_size - 1, chunk_len))
+    local decoded_slice = _wpp_local_decoder(slice)
+    
+    for _, sample in ipairs(decoded_slice) do
+        table.insert(_wpp_decode_state.buffer, sample)
     end
     
-    if _wpp_active_coroutines then
-        local i = 1
-        while i <= #_wpp_active_coroutines do
-            local coro = _wpp_active_coroutines[i]
-            if coroutine.status(coro) == "dead" then
-                table.remove(_wpp_active_coroutines, i)
-            else
-                coroutine.resume(coro, unpack(event))
-                i = i + 1
-            end
+    _wpp_decode_state.i = i + slice_size
+    
+    if _wpp_decode_state.i > chunk_len then
+        -- Task finished
+        local buffer = _wpp_decode_state.buffer
+        local locals = {nativePeripheral.find(task.type)}
+        for _, loc in ipairs(locals) do
+            local name = nativePeripheral.getName(loc)
+            audio_queues[name] = audio_queues[name] or {}
+            table.insert(audio_queues[name], {methodName=task.methodName, buffer=buffer, volume=task.volume, play_at=task.play_at})
         end
+        table.remove(_wpp_pending_decodes, 1)
+        _wpp_decode_state = nil
+        pumpAudioQueues()
+    else
+        -- Queue another yield event to continue decoding immediately
+        os.queueEvent("wpp_decode_next")
+    end
+end
+
+function wireless.localEventHandler(event)
+    if event[1] == "speaker_audio_empty" or event[1] == "timer" or event[1] == "wpp_decode_next" then
+        pumpAudioQueues()
+        pumpDecoding()
     end
     
     -- event: {1="message type", 2="sender client id", 3="message data", 4="protocol"}
@@ -555,7 +553,7 @@ function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume)
     end
 
     -- Calculate a global synchronization timestamp. Give workers 1.5 seconds to decode the chunk.
-    local play_at = os.clock() + 1.5
+    local play_at = (os.epoch("ingame") / 1000) + 1.5
 
     sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume, play_at}})
 end
