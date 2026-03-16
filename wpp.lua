@@ -1,5 +1,5 @@
 local debugMode = false
-local CURRENT_VERSION = "1"
+local CURRENT_VERSION = "2" -- Increment version for sync/decoder fixes
 local THIS_COMPUTER_ID = os.getComputerID()
 
 local currentProtocol = "wpp@default"
@@ -96,20 +96,56 @@ if originalGetName then
 end
 
 local audio_queues = {}
+local _wpp_last_wakeup_tick = -1
+
 local function pumpAudioQueues()
+    local current_epoch = os.epoch("ingame")
+    local current_time = current_epoch / 1000
+    local next_wakeup = nil
+    
     for name, queue in pairs(audio_queues) do
         while #queue > 0 do
             local item = queue[1]
+            
+            -- Enhanced Synchronization Logic with Safety Guards
+            if item.play_at then
+                local delta = item.play_at - current_time
+                
+                -- Play immediately if:
+                -- 1. It's time or past time (delta <= 0)
+                -- 2. It's too far in the past (> 3s) - Safety against dropped packets or major lag
+                -- 3. It's too far in the future (> 10s) - Safety against clock glitches
+                local should_play = (delta <= 0) or (delta < -3) or (delta > 10)
+                
+                if not should_play then
+                    -- Scheduled for future, wait.
+                    if not next_wakeup or item.play_at < next_wakeup then
+                        next_wakeup = item.play_at
+                    end
+                    break 
+                end
+            end
+            
             if nativePeripheral.call(name, item.methodName, item.buffer, item.volume) then
                 table.remove(queue, 1)
             else
-                break
+                break -- Still busy playing
             end
         end
     end
+    
+    -- Active wakeup trigger to ensure we don't stall between events
+    if next_wakeup and _wpp_last_wakeup_tick ~= current_epoch then
+        local wait_time = next_wakeup - current_time
+        if wait_time < 0 then wait_time = 0 end
+        os.startTimer(wait_time)
+        _wpp_last_wakeup_tick = current_epoch
+    end
 end
 
--- Start->Wrapped Peripheral API funtcions
+-- Start->Wrapped Peripheral API functions
+local _wpp_decoders = {} -- Persistent decoders to prevent audio cuts
+
 local wrappedPeripheralApi = {
     getNames=function(clientId)
         sendReply(clientId, nativePeripheral.getNames())
@@ -146,16 +182,27 @@ local wrappedPeripheralApi = {
         local args = ...
         pcall(function() nativePeripheral.call(peripheralName, methodName, unpack(args)) end)
     end,
-    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume)
+    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume, play_at)
         local dfpwm = require("cc.audio.dfpwm")
-        local decoder = dfpwm.make_decoder()
-        local buffer = decoder(chunk)
-        
         local locals = {nativePeripheral.find(_type)}
+        
         for _, loc in ipairs(locals) do
             local name = nativePeripheral.getName(loc)
+            
+            -- Use persistent decoder for this speaker name to avoid "cuts"
+            if not _wpp_decoders[name] then
+                _wpp_decoders[name] = dfpwm.make_decoder()
+            end
+            
+            local buffer = _wpp_decoders[name](chunk)
+            
             audio_queues[name] = audio_queues[name] or {}
-            table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume})
+            table.insert(audio_queues[name], {
+                methodName=methodName, 
+                buffer=buffer, 
+                volume=volume, 
+                play_at=play_at
+            })
         end
         pumpAudioQueues()
     end,
@@ -341,23 +388,35 @@ function remotePeripheral.multicastCall(_type, method, ...)
     sendMessageBroadcast("multicast_function", {func="wppMulticastCallType", args={_type, method, args}})
 end
 
-local _wpp_master_decoder = nil
-function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume)
+local _wpp_master_sync_decoders = {}
+function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume, play_at)
+    -- Calculate default sync if not provided (give network 1.0s lead)
+    play_at = play_at or ((os.epoch("ingame") / 1000) + 1.0)
+    
     local locals = {nativePeripheral.find(_type)}
     if next(locals) then
-        if not _wpp_master_decoder then 
-            local dfpwm = require("cc.audio.dfpwm")
-            _wpp_master_decoder = dfpwm.make_decoder() 
-        end
-        local buffer = _wpp_master_decoder(chunk)
+        local dfpwm = require("cc.audio.dfpwm")
         for _, loc in ipairs(locals) do
             local name = nativePeripheral.getName(loc)
+            
+            -- Use persistent decoder for master node too
+            if not _wpp_master_sync_decoders[name] then
+                _wpp_master_sync_decoders[name] = dfpwm.make_decoder()
+            end
+            
+            local buffer = _wpp_master_sync_decoders[name](chunk)
+            
             audio_queues[name] = audio_queues[name] or {}
-            table.insert(audio_queues[name], {methodName=method, buffer=buffer, volume=volume})
+            table.insert(audio_queues[name], {
+                methodName=method, 
+                buffer=buffer, 
+                volume=volume,
+                play_at=play_at
+            })
         end
         pumpAudioQueues()
     end
-    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume}})
+    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume, play_at}})
 end
 
 return {wireless=wireless, peripheral=remotePeripheral}

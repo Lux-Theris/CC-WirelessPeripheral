@@ -546,10 +546,9 @@ function uiLoop()
 	end
 end
 
-local dfpwm = require("cc.audio.dfpwm")
-local decoder = dfpwm.make_decoder()
 
 function audioLoop()
+	local next_chunk_time = nil
 	while true do
 
 		-- AUDIO
@@ -560,6 +559,7 @@ function audioLoop()
 				last_download_url = api_base_url .. "?v=" .. version .. "&id=" .. textutils.urlEncode(playing_id)
 				playing_status = 0
 				needs_next_chunk = 1
+				next_chunk_time = nil
 
 				http.request({url = last_download_url, binary = true})
 				is_loading = true
@@ -603,11 +603,19 @@ function audioLoop()
 							size = size + 4
 						end
 				
-						wpp.peripheral.multicastCallDFPWM("speaker", "playAudio", chunk, volume)
+						local current_time = os.epoch("ingame") / 1000
+						if not next_chunk_time or next_chunk_time < current_time then
+							next_chunk_time = current_time + 1.2 -- Initial lead time
+						end
+				
+						wpp.peripheral.multicastCallDFPWM("speaker", "playAudio", chunk, volume, next_chunk_time)
 						
 						local duration = (string.len(chunk) * 8) / 48000
+						next_chunk_time = next_chunk_time + duration
 
-						local sleep_time = duration - 0.2 -- Small buffer to prevent gaps
+						-- Sleep until slightly before we need to send the NEXT packet
+						local sleep_time = (next_chunk_time - duration) - (os.epoch("ingame") / 1000) - 0.4
+						
 						if sleep_time > 0 then
 							local timerId = os.startTimer(sleep_time)
 							parallel.waitForAny(
