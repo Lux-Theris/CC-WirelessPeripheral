@@ -37,6 +37,7 @@ while true do
         -- Ordem de reiniciar e atualizar
         elseif msg == "REBOOT_ALL" then
             sleep(math.random(1, 3))
+            updateWpp()
             os.reboot()
         end
     end
