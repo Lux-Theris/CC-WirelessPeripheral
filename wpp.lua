@@ -97,12 +97,19 @@ if originalGetName then
 end
 
 local audio_queues = {}
+local _wpp_last_wakeup_tick = -1
 local function pumpAudioQueues()
-    local current_time = os.epoch("ingame") / 1000
+    local current_epoch = os.epoch("ingame")
+    local current_time = current_epoch / 1000
+    local next_wakeup = nil
+    
     for name, queue in pairs(audio_queues) do
         while #queue > 0 do
             local item = queue[1]
             if item.play_at and current_time < item.play_at then
+                if not next_wakeup or item.play_at < next_wakeup then
+                    next_wakeup = item.play_at
+                end
                 break -- Wait until the synchronized timestamp is reached
             end
             
@@ -112,6 +119,13 @@ local function pumpAudioQueues()
                 break
             end
         end
+    end
+    
+    if next_wakeup and _wpp_last_wakeup_tick ~= current_epoch then
+        local delta = next_wakeup - current_time
+        if delta < 0 then delta = 0 end
+        os.startTimer(delta) -- Active wakeup trigger
+        _wpp_last_wakeup_tick = current_epoch -- Prevent flooding within the same server tick
     end
 end
 -- Start->Wrapped Peripheral API funtcions
@@ -247,6 +261,12 @@ local function pumpDecoding()
         end
         table.remove(_wpp_pending_decodes, 1)
         _wpp_decode_state = nil
+        
+        -- CRITICAL: Trigger next task if queue isn't empty
+        if #_wpp_pending_decodes > 0 then
+            os.queueEvent("wpp_decode_next")
+        end
+        
         pumpAudioQueues()
     else
         -- Queue another yield event to continue decoding immediately
@@ -536,24 +556,16 @@ function remotePeripheral.multicastCall(_type, method, ...)
 end
 
 local _wpp_master_decoder = nil
-function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume)
+function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume, play_at)
     log("New multicastCallDFPWM(".. _type ..", ".. method ..")")
     
-    local locals = {nativePeripheral.find(_type)}
-    if next(locals) then
-        if not _wpp_master_decoder then 
-            local dfpwm = require("cc.audio.dfpwm")
-            _wpp_master_decoder = dfpwm.make_decoder() 
-        end
-        local buffer = _wpp_master_decoder(chunk)
-        for _, loc in ipairs(locals) do
-            local name = nativePeripheral.getName(loc)
-            pcall(function() nativePeripheral.call(name, method, buffer, volume) end)
-        end
-    end
+    -- Calculate a global synchronization timestamp if not provided. Give workers 1.5 seconds to decode the chunk.
+    play_at = play_at or ((os.epoch("ingame") / 1000) + 1.5)
 
-    -- Calculate a global synchronization timestamp. Give workers 1.5 seconds to decode the chunk.
-    local play_at = (os.epoch("ingame") / 1000) + 1.5
+    -- Add to local queues so the Master is also synchronized
+    _wpp_pending_decodes = _wpp_pending_decodes or {}
+    table.insert(_wpp_pending_decodes, {type=_type, methodName=method, chunk=chunk, volume=volume, play_at=play_at})
+    os.queueEvent("wpp_decode_next")
 
     sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume, play_at}})
 end

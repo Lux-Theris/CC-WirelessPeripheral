@@ -602,14 +602,14 @@ function audioLoop()
 							size = size + 4
 						end
 				
-						wpp.peripheral.multicastCallDFPWM("speaker", "playAudio", chunk, volume)
-						
-						local duration = (string.len(chunk) * 8) / 48000
 						local current_time = os.epoch("ingame") / 1000
-
 						if not next_chunk_time or next_chunk_time < current_time then
 							next_chunk_time = current_time
 						end
+				
+						wpp.peripheral.multicastCallDFPWM("speaker", "playAudio", chunk, volume, next_chunk_time + 1.5)
+						
+						local duration = (string.len(chunk) * 8) / 48000
 
 						next_chunk_time = next_chunk_time + duration
 
@@ -659,7 +659,7 @@ function httpLoop()
 					is_loading = false
 					player_handle = handle
 					start = handle.read(4)
-					size = 16 * 1024 - 4
+					size = 14 * 1024 - 4
 					playing_status = 1
 					os.queueEvent("redraw_screen")
 					os.queueEvent("audio_update")
@@ -685,4 +685,11 @@ function httpLoop()
 	end
 end
 
-parallel.waitForAny(uiLoop, audioLoop, httpLoop)
+function wppLoop()
+	while true do
+		local event = {os.pullEvent()}
+		wpp.wireless.localEventHandler(event)
+	end
+end
+
+parallel.waitForAny(uiLoop, audioLoop, httpLoop, wppLoop)
