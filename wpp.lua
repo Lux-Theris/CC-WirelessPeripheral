@@ -182,6 +182,9 @@ local wrappedPeripheralApi = {
         log("Multicast call(".. peripheralName ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
         pcall(
             function()
+                nativePeripheral.call(peripheralName, methodName, unpack(args))
+            end)
+    end,
     wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume, play_at)
         log("Multicast DFPWM call(".. _type ..", ".. methodName ..")")
         if not _wpp_local_decoder then 
