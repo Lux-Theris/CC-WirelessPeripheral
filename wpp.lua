@@ -217,7 +217,7 @@ function remotePeripheral.getNames()
     for n,clientId in ipairs(clients) do
         if clientId ~= THIS_COMPUTER_ID then
             sendMessage(clientId, "function", {func="getNames"})
-            local reply = recieveReply(clientId, 0.2)
+            local reply = recieveReply(clientId, 1.0) -- Increased timeout for stability
             if reply then for _,name in ipairs(reply.data) do table.insert(allNames, currentProtocol .."://" .. clientId .. "/" .. name) end end
         end
     end
@@ -280,15 +280,13 @@ function remotePeripheral.find(_type, filterFunction)
     local found = {nativePeripheral.find(_type, filterFunction)}
     local clients = table.pack(rednet.lookup(currentProtocol))
     
-    -- Optimize: use findInRemote to get lists of matching types quickly
     for _,clientId in ipairs(clients) do
         if clientId ~= THIS_COMPUTER_ID then
             sendMessage(clientId, "function", {func="findInRemote", args={_type}})
-            local reply = recieveReply(clientId, 0.5) -- Slightly higher timeout for busy Slaves
+            local reply = recieveReply(clientId, 1.0) -- Higher timeout for busy Slaves
             if reply then
                 for _,name in ipairs(reply.data) do
                     local url = currentProtocol .. "://" .. clientId .. "/" .. name
-                    -- For wrap, we need methods. remotePeripheral.wrap will call getMethods.
                     local w = remotePeripheral.wrap(url)
                     if w and (not filterFunction or filterFunction(url, w)) then 
                         table.insert(found, w) 

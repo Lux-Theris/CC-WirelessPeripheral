@@ -40,7 +40,7 @@ term.setBackgroundColor(colors.black)
 term.clear()
 term.setCursorPos(1,1)
 term.setTextColor(colors.white)
-print("--- Music Master (".. version ..") ---")
+print("--- Music Master (Version ".. version ..") ---")
 print("Iniciando rede WPP...")
 sleep(0.5)
 
@@ -48,16 +48,16 @@ print("Escaneando rede por speakers...")
 local speakers = { wpp.peripheral.find("speaker") }
 
 if #speakers == 0 then
-    term.setTextColor(colors.yellow)
-    print("\nNenhum speaker encontrado.")
+    term.setTextColor(colors.red)
+    print("\nERRO: Nenhum speaker encontrado!")
     print("Verifique a rede ou rode update-slaves.lua")
-    sleep(2)
-else
-    term.setTextColor(colors.green)
-    print("\n" .. #speakers .. " speakers encontrados!")
-    print("Conectando e sincronizando...")
-    sleep(1.5)
+    error("", 0)
 end
+
+term.setTextColor(colors.green)
+print("\n" .. #speakers .. " speakers encontrados!")
+print("Conectando e sincronizando...")
+sleep(1.5)
 -- END STARTUP DISCOVERY UI
 
 function redrawScreen()
