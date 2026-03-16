@@ -49,12 +49,12 @@ local function parsePeripheralUrl(peripheralUrl)
 end
 
 local function sendMessage(clientId, type, data)
-    log("Sending message with type '".. type .."' to ".. currentProtocol .." clientId ".. clientId .." with data: ".. textutils.serialize(data))
+    if debugMode then log("Sending message with type '".. type .."' to ".. currentProtocol .." clientId ".. clientId .." with data: ".. textutils.serialize(data)) end
     rednet.send(clientId, {type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
 local function sendMessageBroadcast(type, data)
-    log("Sending broadcast message with type '".. type .."' on ".. currentProtocol .." with data: ".. textutils.serialize(data))
+    if debugMode then log("Sending broadcast message with type '".. type .."' on ".. currentProtocol .." with data: ".. textutils.serialize(data)) end
     rednet.broadcast({type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
@@ -101,6 +101,10 @@ local function pumpAudioQueues()
     for name, queue in pairs(audio_queues) do
         while #queue > 0 do
             local item = queue[1]
+            if item.play_at and os.clock() < item.play_at then
+                break -- Wait until the synchronized timestamp is reached
+            end
+            
             if nativePeripheral.call(name, item.methodName, item.buffer, item.volume) then
                 table.remove(queue, 1)
             else
@@ -178,24 +182,43 @@ local wrappedPeripheralApi = {
         log("Multicast call(".. peripheralName ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
         pcall(
             function()
-                nativePeripheral.call(peripheralName, methodName, unpack(args))
-            end)
-    end,
-    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume)
+    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume, play_at)
         log("Multicast DFPWM call(".. _type ..", ".. methodName ..")")
         if not _wpp_local_decoder then 
             local dfpwm = require("cc.audio.dfpwm")
             _wpp_local_decoder = dfpwm.make_decoder() 
         end
-        local buffer = _wpp_local_decoder(chunk)
-        
-        local locals = {nativePeripheral.find(_type)}
-        for i, loc in ipairs(locals) do
-            local name = nativePeripheral.getName(loc)
-            audio_queues[name] = audio_queues[name] or {}
-            table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume})
+        local function decodeAsync()
+            local buffer = {}
+            local chunk_len = string.len(chunk)
+            local slice_size = 2000 -- Process 2KB at a time to prevent TPS crashes
+            
+            for i = 1, chunk_len, slice_size do
+                local slice = string.sub(chunk, i, math.min(i + slice_size - 1, chunk_len))
+                local decoded_slice = _wpp_local_decoder(slice)
+                for _, sample in ipairs(decoded_slice) do
+                    table.insert(buffer, sample)
+                end
+                os.queueEvent("wpp_decode_yield")
+                os.pullEvent("wpp_decode_yield")
+            end
+            
+            local locals = {nativePeripheral.find(_type)}
+            for i, loc in ipairs(locals) do
+                local name = nativePeripheral.getName(loc)
+                audio_queues[name] = audio_queues[name] or {}
+                table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume, play_at=play_at})
+            end
+            pumpAudioQueues()
         end
-        pumpAudioQueues()
+        
+        -- Run the async decoder without blocking the rednet listener
+        local coro = coroutine.create(decodeAsync)
+        coroutine.resume(coro)
+        
+        -- Register the coroutine so it can be pumped alongside standard events
+        _wpp_active_coroutines = _wpp_active_coroutines or {}
+        table.insert(_wpp_active_coroutines, coro)
     end
 }
 -- End->Wrapped Peripheral API funtcions
@@ -222,11 +245,25 @@ function wireless.localEventHandler(event)
     if event[1] == "speaker_audio_empty" or event[1] == "timer" then
         pumpAudioQueues()
     end
+    
+    if _wpp_active_coroutines then
+        local i = 1
+        while i <= #_wpp_active_coroutines do
+            local coro = _wpp_active_coroutines[i]
+            if coroutine.status(coro) == "dead" then
+                table.remove(_wpp_active_coroutines, i)
+            else
+                coroutine.resume(coro, unpack(event))
+                i = i + 1
+            end
+        end
+    end
+    
     -- event: {1="message type", 2="sender client id", 3="message data", 4="protocol"}
     if event[1] == "rednet_message" then
         if event[4] == currentProtocol then
             if event[3].version and event[3].version == CURRENT_VERSION then
-                log("Recieved message: ".. textutils.serialize(event[3]))
+                if debugMode then log("Recieved message: ".. textutils.serialize(event[3])) end
                 if event[3].type == "function" then
                     wrappedPeripheralApi[event[3].data.func](event[2], unpack(event[3].data.args or {}))
                 elseif event[3].type == "multicast_function" then
@@ -514,7 +551,10 @@ function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume)
         end
     end
 
-    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume}})
+    -- Calculate a global synchronization timestamp. Give workers 1.5 seconds to decode the chunk.
+    local play_at = os.clock() + 1.5
+
+    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume, play_at}})
 end
 
 -- Injecting the wppMulticastCallType into wrappedPeripheralApi globally since we just needed it now
