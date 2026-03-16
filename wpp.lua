@@ -1,5 +1,5 @@
 local debugMode = false
-local CURRENT_VERSION = "2" -- Ensure network consistency
+local CURRENT_VERSION = "2" -- Network Consistency
 local THIS_COMPUTER_ID = os.getComputerID()
 
 local currentProtocol = "wpp@default"
@@ -45,7 +45,7 @@ local function sendReply(clientId, data)
 end
 
 local function recieveReply(expectedClientId, timeout)
-    timeout = timeout or 5 -- Lower default from 10 to 5
+    timeout = timeout or 5
     local timerId = os.startTimer(timeout)
     while true do
         local event = {os.pullEvent()}
@@ -117,6 +117,17 @@ local wrappedPeripheralApi = {
         local args = ...
         local status,result = pcall(function() return {nativePeripheral.call(peripheralName, methodName, unpack(args))} end)
         sendReply(clientId, {returned=result, error=not status})
+    end,
+    -- Fast Type Search Wrapper
+    findInRemote=function(clientId, _type)
+        local names = {nativePeripheral.getNames()}
+        local foundNames = {}
+        for _, name in ipairs(names) do
+            if nativePeripheral.getType(name) == _type then
+                table.insert(foundNames, name)
+            end
+        end
+        sendReply(clientId, foundNames)
     end,
     wppPrefetch=function(clientId, peripheralName, methods)
         local methodResults = {}
@@ -206,7 +217,7 @@ function remotePeripheral.getNames()
     for n,clientId in ipairs(clients) do
         if clientId ~= THIS_COMPUTER_ID then
             sendMessage(clientId, "function", {func="getNames"})
-            local reply = recieveReply(clientId, 0.2) -- FAST SCAN timeout
+            local reply = recieveReply(clientId, 0.2)
             if reply then for _,name in ipairs(reply.data) do table.insert(allNames, currentProtocol .."://" .. clientId .. "/" .. name) end end
         end
     end
@@ -268,23 +279,26 @@ end
 function remotePeripheral.find(_type, filterFunction)
     local found = {nativePeripheral.find(_type, filterFunction)}
     local clients = table.pack(rednet.lookup(currentProtocol))
+    
+    -- Optimize: use findInRemote to get lists of matching types quickly
     for _,clientId in ipairs(clients) do
         if clientId ~= THIS_COMPUTER_ID then
-            -- Optimize: only call getType if we are looking for remote ones
-            sendMessage(clientId, "function", {func="getNames"})
-            local reply = recieveReply(clientId, 0.2)
+            sendMessage(clientId, "function", {func="findInRemote", args={_type}})
+            local reply = recieveReply(clientId, 0.5) -- Slightly higher timeout for busy Slaves
             if reply then
                 for _,name in ipairs(reply.data) do
                     local url = currentProtocol .. "://" .. clientId .. "/" .. name
-                    if remotePeripheral.getType(url) == _type then
-                        local w = remotePeripheral.wrap(url)
-                        if not filterFunction or filterFunction(url, w) then table.insert(found, w) end
+                    -- For wrap, we need methods. remotePeripheral.wrap will call getMethods.
+                    local w = remotePeripheral.wrap(url)
+                    if w and (not filterFunction or filterFunction(url, w)) then 
+                        table.insert(found, w) 
                     end
                 end
             end
         end
     end
-    return #found > 0 and table.unpack(found) or nil
+    
+    if #found > 0 then return table.unpack(found) end
 end
 
 function remotePeripheral.multicastCall(_type, method, ...)

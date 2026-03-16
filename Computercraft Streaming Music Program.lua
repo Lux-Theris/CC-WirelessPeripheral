@@ -35,10 +35,30 @@ local size = nil
 local needs_next_chunk = 0
 local buffer
 
+-- STARTUP DISCOVERY UI
+term.setBackgroundColor(colors.black)
+term.clear()
+term.setCursorPos(1,1)
+term.setTextColor(colors.white)
+print("--- Music Master (".. version ..") ---")
+print("Iniciando rede WPP...")
+sleep(0.5)
+
+print("Escaneando rede por speakers...")
 local speakers = { wpp.peripheral.find("speaker") }
+
 if #speakers == 0 then
-	error("No speakers attached. You need to connect a speaker to this computer. If this is an Advanced Noisy Pocket Computer, then this is a bug, and you should try restarting your Minecraft game.", 0)
+    term.setTextColor(colors.yellow)
+    print("\nNenhum speaker encontrado.")
+    print("Verifique a rede ou rode update-slaves.lua")
+    sleep(2)
+else
+    term.setTextColor(colors.green)
+    print("\n" .. #speakers .. " speakers encontrados!")
+    print("Conectando e sincronizando...")
+    sleep(1.5)
 end
+-- END STARTUP DISCOVERY UI
 
 function redrawScreen()
 	if waiting_for_input then
