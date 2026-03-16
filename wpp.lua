@@ -73,6 +73,15 @@ end
 -- End->
 
 local nativePeripheral = peripheral
+local originalGetName = nativePeripheral.getName
+if originalGetName then
+    peripheral.getName = function(nameOrTable)
+        if type(nameOrTable) == "table" and nameOrTable._wpp_name then
+            return nameOrTable._wpp_name
+        end
+        return originalGetName(nameOrTable)
+    end
+end
 -- Start->Wrapped Peripheral API funtcions
 --      These are ran on the computers that are directly connected to the peripherals
 local wrappedPeripheralApi = {
@@ -376,6 +385,7 @@ function remotePeripheral.wrap(peripheralUrl)
         wrappedMethodsTable["wppPrefetch"] = function(methods)
             wireless.prefetchMethods(peripheralUrl, methods)
         end
+        wrappedMethodsTable._wpp_name = parsedPeripheralUrl.peripheralId
 
         return wrappedMethodsTable;
     end

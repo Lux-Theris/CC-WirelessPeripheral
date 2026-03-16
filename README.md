@@ -1,5 +1,7 @@
-# CC-WirelessPeripheral
+# Fork of jdf221'sCC-WirelessPeripheral 
 An implementation of the Computer Craft peripheral API allowing the use of wireless modems
+
+Check the original repo [here](https://github.com/jdf221/CC-WirelessPeripheral)
 
 [Jump to how to use it](#usage)
 
