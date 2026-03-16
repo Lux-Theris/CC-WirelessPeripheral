@@ -2,12 +2,35 @@ local CANAL = 65535
 local modem = peripheral.find("modem") or error("Precisa de um modem!")
 modem.open(CANAL)
 
+local MASTER_WPP_URL = "https://raw.githubusercontent.com/Lux-Theris/CC-WirelessPeripheral/refs/heads/main/wpp.lua"
+local MASTER_MUSIC_URL = "https://raw.githubusercontent.com/Lux-Theris/CC-WirelessPeripheral/refs/heads/main/Computercraft%20Streaming%20Music%20Program.lua"
+
+local function downloadFile(url, path)
+    print("Baixando " .. path .. "...")
+    local response = http.get(url)
+    if response then
+        local f = fs.open(path, "w")
+        f.write(response.readAll())
+        f.close()
+        response.close()
+        return true
+    end
+    return false
+end
+
 term.clear()
 term.setCursorPos(1,1)
-print("--- GERENCIADOR DINAMICO ---")
+print("--- SISTEMA DE ATUALIZACAO ---")
+
+-- FASE 0: AUTO-ATUALIZAÇÃO DO MASTER
+print("Fase 0: Auto-atualizacao do Master")
+if not downloadFile(MASTER_WPP_URL, "wpp") then print("ERRO: Falha ao baixar wpp!") end
+if not downloadFile(MASTER_MUSIC_URL, "music") then print("ERRO: Falha ao baixar music!") end
+print("Master atualizado com sucesso!\n")
+sleep(1)
 
 -- FASE 1: ESCANEAR REDE
-print("Escaneando rede (3s)...")
+print("Fase 1: Escaneando rede (3s)...")
 modem.transmit(CANAL, CANAL, "PING_NETWORK")
 
 local pcsOnline = {}
