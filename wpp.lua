@@ -57,17 +57,25 @@ local function sendReply(clientId, data)
     sendMessage(clientId, "reply", data)
 end
 
-local function recieveReply()
-    local clientId, message = rednet.receive(currentProtocol, 10)
-
-    if message == nil then
-        return nil
-    end
-
-    if(message.type == "reply") then
-        return message
-    else
-        return nil
+local function recieveReply(expectedClientId)
+    local timerId = os.startTimer(10)
+    while true do
+        local event = {os.pullEvent()}
+        
+        if event[1] == "timer" and event[2] == timerId then
+            return nil
+        elseif event[1] == "rednet_message" then
+            local senderId = event[2]
+            local message = event[3]
+            local protocol = event[4]
+            
+            if protocol == currentProtocol and (not expectedClientId or senderId == expectedClientId) then
+                if type(message) == "table" and message.type == "reply" then
+                    os.cancelTimer(timerId)
+                    return message
+                end
+            end
+        end
     end
 end
 -- End->
@@ -228,7 +236,7 @@ function wireless.prefetchMethods(peripheralUrl, methods)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="wppPrefetch", args={parsedPeripheralUrl.peripheralId, methods}})
 
-        local reply = recieveReply()
+        local reply = recieveReply(parsedPeripheralUrl.clientId)
 
         if reply then
             prefetchCache[peripheralUrl] = reply.data
@@ -246,7 +254,7 @@ function remotePeripheral.getNames()
     for n,clientId in ipairs(clients) do
         if clientId ~= THIS_COMPUTER_ID then
             sendMessage(clientId, "function", {func="getNames"})
-            local reply = recieveReply()
+            local reply = recieveReply(clientId)
             log("New getNames() reply: ".. textutils.serialize(reply))
 
             if reply then
@@ -270,7 +278,7 @@ function remotePeripheral.isPresent(peripheralUrl)
         return nativePeripheral.isPresent(peripheralUrl)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="isPresent", args={parsedPeripheralUrl.peripheralId}})
-        local reply = recieveReply()
+        local reply = recieveReply(parsedPeripheralUrl.clientId)
         log("New isPresent(".. peripheralUrl ..") reply: ".. textutils.serialize(reply))
 
         if reply then
@@ -291,7 +299,7 @@ function remotePeripheral.getType(peripheralUrl)
         return nativePeripheral.getType(peripheralUrl)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="getType", args={parsedPeripheralUrl.peripheralId}})
-        local reply = recieveReply()
+        local reply = recieveReply(parsedPeripheralUrl.clientId)
         log("New getType(".. peripheralUrl ..") reply: ".. textutils.serialize(reply))
 
         if reply then
@@ -312,7 +320,7 @@ function remotePeripheral.getMethods(peripheralUrl)
         return nativePeripheral.getMethods(peripheralUrl)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="getMethods", args={parsedPeripheralUrl.peripheralId}})
-        local reply = recieveReply()
+        local reply = recieveReply(parsedPeripheralUrl.clientId)
         log("New getMethods(".. peripheralUrl ..") reply: ".. textutils.serialize(reply))
 
         if reply then
@@ -341,7 +349,7 @@ function remotePeripheral.call(peripheralUrl, method, ...)
         return nativePeripheral.call(peripheralUrl, method, ...)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="call", args={parsedPeripheralUrl.peripheralId, method, {...}}})
-        local reply = recieveReply()
+        local reply = recieveReply(parsedPeripheralUrl.clientId)
         log("New call(".. peripheralUrl ..", ".. method ..") reply: ".. textutils.serialize(reply))
 
         if reply then
