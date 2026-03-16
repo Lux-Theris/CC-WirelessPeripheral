@@ -1,5 +1,5 @@
 local debugMode = false
-local CURRENT_VERSION = "2" -- Incrementing version for the major PCM shift
+local CURRENT_VERSION = "1"
 local THIS_COMPUTER_ID = os.getComputerID()
 
 local currentProtocol = "wpp@default"
@@ -48,7 +48,7 @@ local function parsePeripheralUrl(peripheralUrl)
 end
 
 local function sendMessage(clientId, type, data)
-    if debugMode then log("Sending message with type '".. type .."' to ".. currentProtocol .. " id ".. clientId) end
+    if debugMode then log("Sending message with type '".. type .."' to ".. currentProtocol .." clientId ".. clientId) end
     rednet.send(clientId, {type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
@@ -96,23 +96,10 @@ if originalGetName then
 end
 
 local audio_queues = {}
-local _wpp_last_wakeup_tick = -1
-
 local function pumpAudioQueues()
-    local current_epoch = os.epoch("ingame")
-    local current_time = current_epoch / 1000
-    local next_wakeup = nil
-    
     for name, queue in pairs(audio_queues) do
         while #queue > 0 do
             local item = queue[1]
-            if item.play_at and current_time < item.play_at then
-                if not next_wakeup or item.play_at < next_wakeup then
-                    next_wakeup = item.play_at
-                end
-                break
-            end
-            
             if nativePeripheral.call(name, item.methodName, item.buffer, item.volume) then
                 table.remove(queue, 1)
             else
@@ -120,23 +107,6 @@ local function pumpAudioQueues()
             end
         end
     end
-    
-    if next_wakeup and _wpp_last_wakeup_tick ~= current_epoch then
-        local delta = next_wakeup - current_time
-        if delta < 0 then delta = 0 end
-        os.startTimer(delta)
-        _wpp_last_wakeup_tick = current_epoch
-    end
-end
-
--- Fast binary string to signed 8-bit table conversion
-local function binaryToPcmTable(s)
-    local t = {}
-    local len = #s
-    for i = 1, len do
-        t[i] = string.byte(s, i) - 128
-    end
-    return t
 end
 
 -- Start->Wrapped Peripheral API funtcions
@@ -156,8 +126,7 @@ local wrappedPeripheralApi = {
     call=function(clientId, peripheralName, methodName, ...)
         local args = ...
         local status,result = pcall(function()
-            local r = {nativePeripheral.call(peripheralName, methodName, unpack(args))}
-            return r
+            return {nativePeripheral.call(peripheralName, methodName, unpack(args))}
         end)
         sendReply(clientId, {returned=result, error=not status})
     end,
@@ -166,7 +135,9 @@ local wrappedPeripheralApi = {
         for possibleMethodName,methodInfo in pairs(methods) do
             local methodName = (type(methodInfo) == "table") and possibleMethodName or methodInfo
             local methodArgs = (type(methodInfo) == "table") and methodInfo or {}
-            local status,result = pcall(function() return {nativePeripheral.call(peripheralName, methodName, unpack(methodArgs))} end)
+            local status,result = pcall(function()
+                return {nativePeripheral.call(peripheralName, methodName, unpack(methodArgs))}
+            end)
             if status then methodResults[methodName] = result end
         end
         sendReply(clientId, methodResults)
@@ -175,13 +146,16 @@ local wrappedPeripheralApi = {
         local args = ...
         pcall(function() nativePeripheral.call(peripheralName, methodName, unpack(args)) end)
     end,
-    wppMulticastPlayAudioPCM=function(_type, methodName, pcm_binary, volume, play_at)
-        local buffer = binaryToPcmTable(pcm_binary)
+    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume)
+        local dfpwm = require("cc.audio.dfpwm")
+        local decoder = dfpwm.make_decoder()
+        local buffer = decoder(chunk)
+        
         local locals = {nativePeripheral.find(_type)}
         for _, loc in ipairs(locals) do
             local name = nativePeripheral.getName(loc)
             audio_queues[name] = audio_queues[name] or {}
-            table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume, play_at=play_at})
+            table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume})
         end
         pumpAudioQueues()
     end,
@@ -367,20 +341,23 @@ function remotePeripheral.multicastCall(_type, method, ...)
     sendMessageBroadcast("multicast_function", {func="wppMulticastCallType", args={_type, method, args}})
 end
 
--- New Master-Decoding function
-function remotePeripheral.multicastCallPCM(_type, method, pcm_binary, volume, play_at)
-    -- Local playback
-    local buffer = binaryToPcmTable(pcm_binary)
+local _wpp_master_decoder = nil
+function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume)
     local locals = {nativePeripheral.find(_type)}
-    for _, loc in ipairs(locals) do
-        local name = nativePeripheral.getName(loc)
-        audio_queues[name] = audio_queues[name] or {}
-        table.insert(audio_queues[name], {methodName=method, buffer=buffer, volume=volume, play_at=play_at})
+    if next(locals) then
+        if not _wpp_master_decoder then 
+            local dfpwm = require("cc.audio.dfpwm")
+            _wpp_master_decoder = dfpwm.make_decoder() 
+        end
+        local buffer = _wpp_master_decoder(chunk)
+        for _, loc in ipairs(locals) do
+            local name = nativePeripheral.getName(loc)
+            audio_queues[name] = audio_queues[name] or {}
+            table.insert(audio_queues[name], {methodName=method, buffer=buffer, volume=volume})
+        end
+        pumpAudioQueues()
     end
-    pumpAudioQueues()
-    
-    -- Remote playback
-    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioPCM", args={_type, method, pcm_binary, volume, play_at}})
+    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume}})
 end
 
 return {wireless=wireless, peripheral=remotePeripheral}

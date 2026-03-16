@@ -550,8 +550,8 @@ local dfpwm = require("cc.audio.dfpwm")
 local decoder = dfpwm.make_decoder()
 
 function audioLoop()
-	local next_chunk_time = nil
 	while true do
+
 		-- AUDIO
 		if playing and now_playing then
 			local thisnowplayingid = now_playing.id
@@ -560,8 +560,6 @@ function audioLoop()
 				last_download_url = api_base_url .. "?v=" .. version .. "&id=" .. textutils.urlEncode(playing_id)
 				playing_status = 0
 				needs_next_chunk = 1
-				next_chunk_time = nil
-				decoder = dfpwm.make_decoder() -- Reset decoder for new song
 
 				http.request({url = last_download_url, binary = true})
 				is_loading = true
@@ -569,10 +567,10 @@ function audioLoop()
 				os.queueEvent("redraw_screen")
 				os.queueEvent("audio_update")
 			elseif playing_status == 1 and needs_next_chunk == 1 then
+
 				while true do
-					local dfpwm_chunk = player_handle.read(size)
-					if not dfpwm_chunk then
-						-- Song finished logic
+					local chunk = player_handle.read(size)
+					if not chunk then
 						if looping == 2 or (looping == 1 and #queue == 0) then
 							playing_id = nil
 						elseif looping == 1 and #queue > 0 then
@@ -593,58 +591,44 @@ function audioLoop()
 								is_error = false
 							end
 						end
+
 						os.queueEvent("redraw_screen")
+
 						player_handle.close()
 						needs_next_chunk = 0
 						break
 					else
-						-- Process and slice PCM audio
 						if start then
-							dfpwm_chunk, start = start .. dfpwm_chunk, nil
+							chunk, start = start .. chunk, nil
 							size = size + 4
 						end
+				
+						wpp.peripheral.multicastCallDFPWM("speaker", "playAudio", chunk, volume)
 						
-						local pcm_table = decoder(dfpwm_chunk)
-						local total_samples = #pcm_table
-						local slice_size = 24000 -- 0.5s at 48kHz
-						
-						for offset = 1, total_samples, slice_size do
-							local count = math.min(slice_size, total_samples - offset + 1)
-							local pcm_slice = {}
-							for i = 0, count - 1 do
-								pcm_slice[i+1] = string.char(pcm_table[offset + i] + 128)
-							end
-							local binary_string = table.concat(pcm_slice)
-							
-							local current_time = os.epoch("ingame") / 1000
-							if not next_chunk_time or next_chunk_time < current_time then
-								next_chunk_time = current_time
-							end
+						local duration = (string.len(chunk) * 8) / 48000
 
-							-- Broadcast the 0.5s PCM chunk
-							wpp.peripheral.multicastCallPCM("speaker", "playAudio", binary_string, volume, next_chunk_time + 1.0)
-							
-							local slice_duration = count / 48000
-							next_chunk_time = next_chunk_time + slice_duration
-							
-							-- Wait for the timeline to catch up before sending more to avoid network burst
-							local sleep_time = (next_chunk_time - slice_duration) - (os.epoch("ingame") / 1000)
-							if sleep_time > 0.1 then
-								sleep(sleep_time - 0.1)
-							end
-
-							if not playing or playing_id ~= thisnowplayingid then
-								break
-							end
+						local sleep_time = duration - 0.2 -- Small buffer to prevent gaps
+						if sleep_time > 0 then
+							local timerId = os.startTimer(sleep_time)
+							parallel.waitForAny(
+								function()
+									repeat until select(2, os.pullEvent("timer")) == timerId
+								end,
+								function()
+									os.pullEvent("playback_stopped")
+								end
+							)
 						end
-					end
-					if not playing or playing_id ~= thisnowplayingid then
-						break
+
+						if not playing or playing_id ~= thisnowplayingid then
+							break
+						end
 					end
 				end
 				os.queueEvent("audio_update")
 			end
 		end
+
 		os.pullEvent("audio_update")
 	end
 end
