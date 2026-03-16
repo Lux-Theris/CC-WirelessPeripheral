@@ -95,6 +95,20 @@ if originalGetName then
         return originalGetName(nameOrTable)
     end
 end
+
+local audio_queues = {}
+local function pumpAudioQueues()
+    for name, queue in pairs(audio_queues) do
+        while #queue > 0 do
+            local item = queue[1]
+            if nativePeripheral.call(name, item.methodName, item.buffer, item.volume) then
+                table.remove(queue, 1)
+            else
+                break
+            end
+        end
+    end
+end
 -- Start->Wrapped Peripheral API funtcions
 --      These are ran on the computers that are directly connected to the peripherals
 local wrappedPeripheralApi = {
@@ -176,22 +190,12 @@ local wrappedPeripheralApi = {
         local buffer = _wpp_local_decoder(chunk)
         
         local locals = {nativePeripheral.find(_type)}
-        local fn = {}
         for i, loc in ipairs(locals) do
-            fn[i] = function()
-                local name = nativePeripheral.getName(loc)
-                while not nativePeripheral.call(name, methodName, buffer, volume) do
-                    local timerId = os.startTimer(0.1)
-                    parallel.waitForAny(
-                        function() repeat until select(2, os.pullEvent("timer")) == timerId end,
-                        function() os.pullEvent("speaker_audio_empty") end
-                    )
-                end
-            end
+            local name = nativePeripheral.getName(loc)
+            audio_queues[name] = audio_queues[name] or {}
+            table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume})
         end
-        if next(fn) then
-            pcall(parallel.waitForAll, table.unpack(fn))
-        end
+        pumpAudioQueues()
     end
 }
 -- End->Wrapped Peripheral API funtcions
@@ -215,6 +219,9 @@ function wireless.host(networkId)
 end
 
 function wireless.localEventHandler(event)
+    if event[1] == "speaker_audio_empty" or event[1] == "timer" then
+        pumpAudioQueues()
+    end
     -- event: {1="message type", 2="sender client id", 3="message data", 4="protocol"}
     if event[1] == "rednet_message" then
         if event[4] == currentProtocol then
