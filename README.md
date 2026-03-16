@@ -29,7 +29,7 @@ But yeah in that screenshot you can see the idea of how it works. You have compu
 
 Install
 ```
-wget https://raw.githubusercontent.com/jdf221/CC-WirelessPeripheral/main/wpp.lua wpp
+wget https://raw.githubusercontent.com/Lux-Theris/CC-WirelessPeripheral/refs/heads/main/wpp.lua wpp
 ```
 
 As the computer wanting to use/access the remote peripherals:
