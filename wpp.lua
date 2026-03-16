@@ -166,6 +166,32 @@ local wrappedPeripheralApi = {
             function()
                 nativePeripheral.call(peripheralName, methodName, unpack(args))
             end)
+    end,
+    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume)
+        log("Multicast DFPWM call(".. _type ..", ".. methodName ..")")
+        if not _wpp_local_decoder then 
+            local dfpwm = require("cc.audio.dfpwm")
+            _wpp_local_decoder = dfpwm.make_decoder() 
+        end
+        local buffer = _wpp_local_decoder(chunk)
+        
+        local locals = {nativePeripheral.find(_type)}
+        local fn = {}
+        for i, loc in ipairs(locals) do
+            fn[i] = function()
+                local name = nativePeripheral.getName(loc)
+                while not nativePeripheral.call(name, methodName, buffer, volume) do
+                    local timerId = os.startTimer(0.1)
+                    parallel.waitForAny(
+                        function() repeat until select(2, os.pullEvent("timer")) == timerId end,
+                        function() os.pullEvent("speaker_audio_empty") end
+                    )
+                end
+            end
+        end
+        if next(fn) then
+            pcall(parallel.waitForAll, table.unpack(fn))
+        end
     end
 }
 -- End->Wrapped Peripheral API funtcions
@@ -462,6 +488,26 @@ function remotePeripheral.multicastCall(_type, method, ...)
     -- might have different local speaker IDs. 
     -- We can modify wppMulticastCall to iterate over local peripherals matching the type, rather than an ID!
     sendMessageBroadcast("multicast_function", {func="wppMulticastCallType", args={_type, method, args}})
+end
+
+local _wpp_master_decoder = nil
+function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume)
+    log("New multicastCallDFPWM(".. _type ..", ".. method ..")")
+    
+    local locals = {nativePeripheral.find(_type)}
+    if next(locals) then
+        if not _wpp_master_decoder then 
+            local dfpwm = require("cc.audio.dfpwm")
+            _wpp_master_decoder = dfpwm.make_decoder() 
+        end
+        local buffer = _wpp_master_decoder(chunk)
+        for _, loc in ipairs(locals) do
+            local name = nativePeripheral.getName(loc)
+            pcall(function() nativePeripheral.call(name, method, buffer, volume) end)
+        end
+    end
+
+    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume}})
 end
 
 -- Injecting the wppMulticastCallType into wrappedPeripheralApi globally since we just needed it now
