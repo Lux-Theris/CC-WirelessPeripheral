@@ -49,8 +49,13 @@ local function parsePeripheralUrl(peripheralUrl)
 end
 
 local function sendMessage(clientId, type, data)
-    log("Sending message with type '".. type .."' to ".. currentProtocol .."://".. clientId .." with data: ".. textutils.serialize(data))
+    log("Sending message with type '".. type .."' to ".. currentProtocol .." clientId ".. clientId .." with data: ".. textutils.serialize(data))
     rednet.send(clientId, {type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
+end
+
+local function sendMessageBroadcast(type, data)
+    log("Sending broadcast message with type '".. type .."' on ".. currentProtocol .." with data: ".. textutils.serialize(data))
+    rednet.broadcast({type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
 local function sendReply(clientId, data)
@@ -154,6 +159,14 @@ local wrappedPeripheralApi = {
 
         sendReply(clientId, methodResults)
     end,
+    wppMulticastCall=function(peripheralName, methodName, ...)
+        local args = ...
+        log("Multicast call(".. peripheralName ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
+        pcall(
+            function()
+                nativePeripheral.call(peripheralName, methodName, unpack(args))
+            end)
+    end
 }
 -- End->Wrapped Peripheral API funtcions
 
@@ -183,6 +196,8 @@ function wireless.localEventHandler(event)
                 log("Recieved message: ".. textutils.serialize(event[3]))
                 if event[3].type == "function" then
                     wrappedPeripheralApi[event[3].data.func](event[2], unpack(event[3].data.args or {}))
+                elseif event[3].type == "multicast_function" then
+                    wrappedPeripheralApi[event[3].data.func](unpack(event[3].data.args or {}))
                 end
             else
                 log("Recieved event from an unsupported WPP version. Only version '".. CURRENT_VERSION .."' is supported.")
@@ -428,6 +443,40 @@ function remotePeripheral.find(_type, filterFunction)
         return table.unpack(foundToReturn)
     end
 end
+
+function remotePeripheral.multicastCall(_type, method, ...)
+    log("New multicastCall(".. _type ..", ".. method ..", ".. textutils.serialize({...}) ..")")
+    -- Ensure at least one peripheral is locally attached for safety if needed, or simply blast it.
+    local args = {...}
+    
+    -- Local peripherals
+    local locals = {nativePeripheral.find(_type)}
+    for _, loc in ipairs(locals) do
+        local name = nativePeripheral.getName(loc)
+        pcall(function() nativePeripheral.call(name, method, unpack(args)) end)
+    end
+
+    -- Remote peripherals (Broadcast fire-and-forget)
+    -- wppMulticastCall expects: peripheralName, methodName, args
+    -- Wait, we would have to broadcast to a specific peripheral ID (like "speaker_0"). But multiple computers
+    -- might have different local speaker IDs. 
+    -- We can modify wppMulticastCall to iterate over local peripherals matching the type, rather than an ID!
+    sendMessageBroadcast("multicast_function", {func="wppMulticastCallType", args={_type, method, args}})
+end
+
+-- Injecting the wppMulticastCallType into wrappedPeripheralApi globally since we just needed it now
+wrappedPeripheralApi.wppMulticastCallType = function(_type, methodName, args)
+    log("Multicast call type(".. _type ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
+    local locals = {nativePeripheral.find(_type)}
+    for _, loc in ipairs(locals) do
+        local name = nativePeripheral.getName(loc)
+        pcall(
+            function()
+                nativePeripheral.call(name, methodName, unpack(args))
+            end)
+    end
+end
+
 -- End->New peripheral API using WPP
 -- End->Public API Functions
 
