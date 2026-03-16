@@ -1,5 +1,5 @@
 local debugMode = false
-local CURRENT_VERSION = "1"
+local CURRENT_VERSION = "2" -- Incrementing version for the major PCM shift
 local THIS_COMPUTER_ID = os.getComputerID()
 
 local currentProtocol = "wpp@default"
@@ -21,7 +21,6 @@ local function log(message)
 
     if debugMode then
         print(logMessage)
-        --rednet.broadcast({type="debug", version=CURRENT_VERSION, data=logMessage}, "debug_".. currentProtocol)
     end
 end
 
@@ -49,12 +48,12 @@ local function parsePeripheralUrl(peripheralUrl)
 end
 
 local function sendMessage(clientId, type, data)
-    if debugMode then log("Sending message with type '".. type .."' to ".. currentProtocol .." clientId ".. clientId .." with data: ".. textutils.serialize(data)) end
+    if debugMode then log("Sending message with type '".. type .."' to ".. currentProtocol .. " id ".. clientId) end
     rednet.send(clientId, {type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
 local function sendMessageBroadcast(type, data)
-    if debugMode then log("Sending broadcast message with type '".. type .."' on ".. currentProtocol .." with data: ".. textutils.serialize(data)) end
+    if debugMode then log("Broadcasting message type '".. type .."' on ".. currentProtocol) end
     rednet.broadcast({type=type, version=CURRENT_VERSION, data=data}, currentProtocol)
 end
 
@@ -98,6 +97,7 @@ end
 
 local audio_queues = {}
 local _wpp_last_wakeup_tick = -1
+
 local function pumpAudioQueues()
     local current_epoch = os.epoch("ingame")
     local current_time = current_epoch / 1000
@@ -110,7 +110,7 @@ local function pumpAudioQueues()
                 if not next_wakeup or item.play_at < next_wakeup then
                     next_wakeup = item.play_at
                 end
-                break -- Wait until the synchronized timestamp is reached
+                break
             end
             
             if nativePeripheral.call(name, item.methodName, item.buffer, item.volume) then
@@ -124,99 +124,84 @@ local function pumpAudioQueues()
     if next_wakeup and _wpp_last_wakeup_tick ~= current_epoch then
         local delta = next_wakeup - current_time
         if delta < 0 then delta = 0 end
-        os.startTimer(delta) -- Active wakeup trigger
-        _wpp_last_wakeup_tick = current_epoch -- Prevent flooding within the same server tick
+        os.startTimer(delta)
+        _wpp_last_wakeup_tick = current_epoch
     end
 end
+
+-- Fast binary string to signed 8-bit table conversion
+local function binaryToPcmTable(s)
+    local t = {}
+    local len = #s
+    for i = 1, len do
+        t[i] = string.byte(s, i) - 128
+    end
+    return t
+end
+
 -- Start->Wrapped Peripheral API funtcions
---      These are ran on the computers that are directly connected to the peripherals
 local wrappedPeripheralApi = {
     getNames=function(clientId)
-        log("Real getNames(".. clientId ..")")
-
         sendReply(clientId, nativePeripheral.getNames())
     end,
     isPresent=function(clientId, peripheralName)
-        log("Real isPresent("..clientId..", ".. peripheralName ..")")
-
         sendReply(clientId, nativePeripheral.isPresent(peripheralName))
     end,
     getType=function(clientId, peripheralName)
-        log("Real getType("..clientId..", ".. peripheralName ..")")
-
         sendReply(clientId, nativePeripheral.getType(peripheralName))
     end,
     getMethods=function(clientId, peripheralName)
-        log("Real getMethods("..clientId..", ".. peripheralName ..")")
-
         sendReply(clientId, nativePeripheral.getMethods(peripheralName))
     end,
     call=function(clientId, peripheralName, methodName, ...)
         local args = ...
-        log("Real call("..clientId..", ".. peripheralName ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
-
-        local status,result = pcall(
-            function()
-                local r = {nativePeripheral.call(peripheralName, methodName, unpack(args))}
-                return r
-            end)
-
+        local status,result = pcall(function()
+            local r = {nativePeripheral.call(peripheralName, methodName, unpack(args))}
+            return r
+        end)
         sendReply(clientId, {returned=result, error=not status})
     end,
     wppPrefetch=function(clientId, peripheralName, methods)
-        log("Real wppPrefetch("..clientId..", ".. peripheralName ..", ".. textutils.serialize(methods) ..")")
         local methodResults = {}
-        
         for possibleMethodName,methodInfo in pairs(methods) do
-            local methodName
-            local methodArgs
-
-            if type(methodInfo) == "table" then
-                methodName = possibleMethodName
-                methodArgs = methodInfo
-            else
-                methodName = methodInfo
-                methodArgs = {}
-            end
-
-            local status,result = pcall(
-            function()
-                local r = {nativePeripheral.call(peripheralName, methodName, unpack(methodArgs))}
-                return r
-            end)
-    
-            if status then
-                methodResults[methodName] = result
-            end
+            local methodName = (type(methodInfo) == "table") and possibleMethodName or methodInfo
+            local methodArgs = (type(methodInfo) == "table") and methodInfo or {}
+            local status,result = pcall(function() return {nativePeripheral.call(peripheralName, methodName, unpack(methodArgs))} end)
+            if status then methodResults[methodName] = result end
         end
-
         sendReply(clientId, methodResults)
     end,
     wppMulticastCall=function(peripheralName, methodName, ...)
         local args = ...
-        log("Multicast call(".. peripheralName ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
-        pcall(
-            function()
-                nativePeripheral.call(peripheralName, methodName, unpack(args))
-            end)
+        pcall(function() nativePeripheral.call(peripheralName, methodName, unpack(args)) end)
     end,
-    wppMulticastPlayAudioDFPWM=function(_type, methodName, chunk, volume, play_at)
-        _wpp_pending_decodes = _wpp_pending_decodes or {}
-        table.insert(_wpp_pending_decodes, {type=_type, methodName=methodName, chunk=chunk, volume=volume, play_at=play_at})
-        os.queueEvent("wpp_decode_next")
+    wppMulticastPlayAudioPCM=function(_type, methodName, pcm_binary, volume, play_at)
+        local buffer = binaryToPcmTable(pcm_binary)
+        local locals = {nativePeripheral.find(_type)}
+        for _, loc in ipairs(locals) do
+            local name = nativePeripheral.getName(loc)
+            audio_queues[name] = audio_queues[name] or {}
+            table.insert(audio_queues[name], {methodName=methodName, buffer=buffer, volume=volume, play_at=play_at})
+        end
+        pumpAudioQueues()
+    end,
+    wppMulticastCallType = function(_type, methodName, args)
+        local locals = {nativePeripheral.find(_type)}
+        for _, loc in ipairs(locals) do
+            local name = nativePeripheral.getName(loc)
+            pcall(function() nativePeripheral.call(name, methodName, unpack(args)) end)
+        end
     end
 }
--- End->Wrapped Peripheral API funtcions
 
 local remotePeripheral = {}
 local wireless = {}
--- Start->Public API functions.
+
 function wireless.setDebugMode(mode)
     debugMode = mode
 end
 
 function wireless.connect(networkId)
-    log("Changing protocol from ".. currentProtocol .." to wpp@".. networkId)
     currentProtocol = "wpp@".. networkId
 end
 
@@ -226,364 +211,176 @@ function wireless.host(networkId)
     rednet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
 end
 
-local _wpp_decode_state = nil
-local function pumpDecoding()
-    if not _wpp_pending_decodes or #_wpp_pending_decodes == 0 then return end
-    
-    if not _wpp_local_decoder then 
-        local dfpwm = require("cc.audio.dfpwm")
-        _wpp_local_decoder = dfpwm.make_decoder() 
-    end
-
-    local task = _wpp_pending_decodes[1]
-    _wpp_decode_state = _wpp_decode_state or { i = 1, buffer = {} }
-    
-    local slice_size = 2000
-    local chunk_len = string.len(task.chunk)
-    local i = _wpp_decode_state.i
-    local slice = string.sub(task.chunk, i, math.min(i + slice_size - 1, chunk_len))
-    local decoded_slice = _wpp_local_decoder(slice)
-    
-    for _, sample in ipairs(decoded_slice) do
-        table.insert(_wpp_decode_state.buffer, sample)
-    end
-    
-    _wpp_decode_state.i = i + slice_size
-    
-    if _wpp_decode_state.i > chunk_len then
-        -- Task finished
-        local buffer = _wpp_decode_state.buffer
-        local locals = {nativePeripheral.find(task.type)}
-        for _, loc in ipairs(locals) do
-            local name = nativePeripheral.getName(loc)
-            audio_queues[name] = audio_queues[name] or {}
-            table.insert(audio_queues[name], {methodName=task.methodName, buffer=buffer, volume=task.volume, play_at=task.play_at})
-        end
-        table.remove(_wpp_pending_decodes, 1)
-        _wpp_decode_state = nil
-        
-        -- CRITICAL: Trigger next task if queue isn't empty
-        if #_wpp_pending_decodes > 0 then
-            os.queueEvent("wpp_decode_next")
-        end
-        
-        pumpAudioQueues()
-    else
-        -- Queue another yield event to continue decoding immediately
-        os.queueEvent("wpp_decode_next")
-    end
-end
-
 function wireless.localEventHandler(event)
-    if event[1] == "speaker_audio_empty" or event[1] == "timer" or event[1] == "wpp_decode_next" then
+    if event[1] == "speaker_audio_empty" or event[1] == "timer" then
         pumpAudioQueues()
-        pumpDecoding()
     end
     
-    -- event: {1="message type", 2="sender client id", 3="message data", 4="protocol"}
     if event[1] == "rednet_message" then
         if event[4] == currentProtocol then
             if event[3].version and event[3].version == CURRENT_VERSION then
-                if debugMode then log("Recieved message: ".. textutils.serialize(event[3])) end
                 if event[3].type == "function" then
                     wrappedPeripheralApi[event[3].data.func](event[2], unpack(event[3].data.args or {}))
                 elseif event[3].type == "multicast_function" then
                     wrappedPeripheralApi[event[3].data.func](unpack(event[3].data.args or {}))
                 end
-            else
-                log("Recieved event from an unsupported WPP version. Only version '".. CURRENT_VERSION .."' is supported.")
             end
         end
     end
 end
 
 function wireless.listen(networkId)
-    rednet.unhost(currentProtocol)
-    wireless.connect(networkId)
-    rednet.host(currentProtocol, tostring(THIS_COMPUTER_ID))
-
+    wireless.host(networkId)
     print("Listening for WPP events on ".. currentProtocol)
-    print("Control+T to quit")
-    while(true) do
+    while true do
         local event = {os.pullEvent()}
         wireless.localEventHandler(event)
     end
 end
 
 function wireless.prefetchMethods(peripheralUrl, methods)
-    log("New prefetchMethods(".. peripheralUrl ..", ".. textutils.serialize(methods) ..")")
     local parsedPeripheralUrl = parsePeripheralUrl(peripheralUrl)
-
     if parsedPeripheralUrl == nil then
         prefetchCache[peripheralUrl] = {}
-        
         for possibleMethodName,methodInfo in pairs(methods) do
-            local methodName
-            local methodArgs
-            
-            if type(methodInfo) == "table" then
-                methodName = possibleMethodName
-                methodArgs = methodInfo
-            else
-                methodName = methodInfo
-                methodArgs = {}
-            end
-
-            local status,result = pcall(
-            function()
-                local r = {remotePeripheral.call(peripheralUrl, methodName, unpack(methodArgs))}
-                return r
-            end)
-
-            if status then
-                prefetchCache[peripheralUrl][methodName] = result
-            end
+            local methodName = (type(methodInfo) == "table") and possibleMethodName or methodInfo
+            local methodArgs = (type(methodInfo) == "table") and methodInfo or {}
+            local status,result = pcall(function() return {remotePeripheral.call(peripheralUrl, methodName, unpack(methodArgs))} end)
+            if status then prefetchCache[peripheralUrl][methodName] = result end
         end
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="wppPrefetch", args={parsedPeripheralUrl.peripheralId, methods}})
-
         local reply = recieveReply(parsedPeripheralUrl.clientId)
-
-        if reply then
-            prefetchCache[peripheralUrl] = reply.data
-        end
+        if reply then prefetchCache[peripheralUrl] = reply.data end
     end
 end
 
--- Start->New peripheral API using WPP
 function remotePeripheral.getNames()
     local allNames = nativePeripheral.getNames()
-
     local clients = table.pack(rednet.lookup(currentProtocol))
-    log("New getNames() found these clients: ".. textutils.serialize(clients))
-
     for n,clientId in ipairs(clients) do
         if clientId ~= THIS_COMPUTER_ID then
             sendMessage(clientId, "function", {func="getNames"})
             local reply = recieveReply(clientId)
-            log("New getNames() reply: ".. textutils.serialize(reply))
-
-            if reply then
-                for n,name in ipairs(reply.data) do
-                    table.insert(allNames, currentProtocol .."://" .. clientId .. "/" .. name)
-                end
-            end
+            if reply then for _,name in ipairs(reply.data) do table.insert(allNames, currentProtocol .."://" .. clientId .. "/" .. name) end end
         end
     end
-
     return allNames
 end
 
 function remotePeripheral.isPresent(peripheralUrl)
-    log("New isPresent(".. peripheralUrl ..")")
-
     local parsedPeripheralUrl = parsePeripheralUrl(peripheralUrl)
-
     if parsedPeripheralUrl == nil then
-        log("New isPresent(".. peripheralUrl ..") using local peripheral")
         return nativePeripheral.isPresent(peripheralUrl)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="isPresent", args={parsedPeripheralUrl.peripheralId}})
         local reply = recieveReply(parsedPeripheralUrl.clientId)
-        log("New isPresent(".. peripheralUrl ..") reply: ".. textutils.serialize(reply))
-
-        if reply then
-            return reply.data;
-        else
-            return false
-        end
+        return reply and reply.data or false
     end
 end
 
 function remotePeripheral.getType(peripheralUrl)
-    log("New getType(".. peripheralUrl ..")")
-
     local parsedPeripheralUrl = parsePeripheralUrl(peripheralUrl)
-
     if parsedPeripheralUrl == nil then
-        log("New getType(".. peripheralUrl ..") using local peripheral")
         return nativePeripheral.getType(peripheralUrl)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="getType", args={parsedPeripheralUrl.peripheralId}})
         local reply = recieveReply(parsedPeripheralUrl.clientId)
-        log("New getType(".. peripheralUrl ..") reply: ".. textutils.serialize(reply))
-
-        if reply then
-            return reply.data;
-        else
-            return nil
-        end
+        return reply and reply.data or nil
     end
 end
 
 function remotePeripheral.getMethods(peripheralUrl)
-    log("New getMethods(".. peripheralUrl ..")")
-
     local parsedPeripheralUrl = parsePeripheralUrl(peripheralUrl)
-
     if parsedPeripheralUrl == nil then
-        log("New getMethods(".. peripheralUrl ..") using local peripheral")
         return nativePeripheral.getMethods(peripheralUrl)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="getMethods", args={parsedPeripheralUrl.peripheralId}})
         local reply = recieveReply(parsedPeripheralUrl.clientId)
-        log("New getMethods(".. peripheralUrl ..") reply: ".. textutils.serialize(reply))
-
-        if reply then
-            return reply.data;
-        else
-            return nil
-        end
+        return reply and reply.data or nil
     end
 end
 
 function remotePeripheral.call(peripheralUrl, method, ...)
-    log("New call(".. peripheralUrl ..", ".. method ..", ".. textutils.serialize({...}) ..")")
-
     if prefetchCache[peripheralUrl] and prefetchCache[peripheralUrl][method] then
-        log("New call(".. peripheralUrl ..", ".. method ..") using prefetched return")
         local returnValue = prefetchCache[peripheralUrl][method]
         prefetchCache[peripheralUrl][method] = nil
-
         return unpack(returnValue)
     end
-
     local parsedPeripheralUrl = parsePeripheralUrl(peripheralUrl)
-
     if parsedPeripheralUrl == nil then
-        log("New call(".. peripheralUrl ..", ".. method ..") using local peripheral")
         return nativePeripheral.call(peripheralUrl, method, ...)
     else
         sendMessage(parsedPeripheralUrl.clientId, "function", {func="call", args={parsedPeripheralUrl.peripheralId, method, {...}}})
         local reply = recieveReply(parsedPeripheralUrl.clientId)
-        log("New call(".. peripheralUrl ..", ".. method ..") reply: ".. textutils.serialize(reply))
-
         if reply then
-            if reply.data.error then
-                error(reply.data.returned)
-            end
-
-            return unpack(reply.data.returned);
-        else
-            return nil
+            if reply.data.error then error(reply.data.returned) end
+            return unpack(reply.data.returned)
         end
+        return nil
     end
 end
 
 function remotePeripheral.wrap(peripheralUrl)
-    log("New wrap(".. peripheralUrl ..")")
-
     local parsedPeripheralUrl = parsePeripheralUrl(peripheralUrl)
-
     if parsedPeripheralUrl == nil then
-        log("New wrap(".. peripheralUrl ..") using local peripheral")
         return nativePeripheral.wrap(peripheralUrl)
     else
-        if not remotePeripheral.isPresent(peripheralUrl) then
-            return nil
-        end
-
+        if not remotePeripheral.isPresent(peripheralUrl) then return nil end
         local peripheralMethods = remotePeripheral.getMethods(peripheralUrl)
-        log("New wrap(".. peripheralUrl ..") wrapping these methods: ".. textutils.serialize(peripheralMethods))
-
         local wrappedMethodsTable = {}
-
         if peripheralMethods then
             for n,method in ipairs(peripheralMethods) do
-                wrappedMethodsTable[method] = function(...)
-                    return remotePeripheral.call(peripheralUrl, method, ...)
-                end
+                wrappedMethodsTable[method] = function(...) return remotePeripheral.call(peripheralUrl, method, ...) end
             end
         end
-
-        wrappedMethodsTable["wppPrefetch"] = function(methods)
-            wireless.prefetchMethods(peripheralUrl, methods)
-        end
+        wrappedMethodsTable["wppPrefetch"] = function(methods) wireless.prefetchMethods(peripheralUrl, methods) end
         wrappedMethodsTable._wpp_name = parsedPeripheralUrl.peripheralId
-
-        return wrappedMethodsTable;
+        return wrappedMethodsTable
     end
 end
 
 function remotePeripheral.find(_type, filterFunction)
-    log("New find(".. _type ..", hasFilterFunction=".. tostring(not(not filterFunction) or false) ..")")
     local foundToReturn = {nativePeripheral.find(_type, filterFunction)}
-
     local allPeripherals = remotePeripheral.getNames()
-
     for n,peripheralUrl in ipairs(allPeripherals) do
         if remotePeripheral.getType(peripheralUrl) == _type then
             local wrappedPeripheral = remotePeripheral.wrap(peripheralUrl)
-
             if filterFunction then
-                local peripheralName = remotePeripheral.getName(peripheralUrl)
-
-               if(filterFunction(peripheralName, wrappedPeripheral)) then
-                    table.insert(foundToReturn, wrappedPeripheral)
-               end
+                local peripheralName = (type(peripheralUrl) == "string") and peripheralUrl or wrappedPeripheral._wpp_name
+               if filterFunction(peripheralName, wrappedPeripheral) then table.insert(foundToReturn, wrappedPeripheral) end
             else
                 table.insert(foundToReturn, wrappedPeripheral)
             end
         end
     end
-
-    local next = next
-    if next(foundToReturn) == nil then
-        return nil
-    else
-        return table.unpack(foundToReturn)
-    end
+    return #foundToReturn > 0 and table.unpack(foundToReturn) or nil
 end
 
 function remotePeripheral.multicastCall(_type, method, ...)
-    log("New multicastCall(".. _type ..", ".. method ..", ".. textutils.serialize({...}) ..")")
-    -- Ensure at least one peripheral is locally attached for safety if needed, or simply blast it.
     local args = {...}
-    
-    -- Local peripherals
     local locals = {nativePeripheral.find(_type)}
     for _, loc in ipairs(locals) do
         local name = nativePeripheral.getName(loc)
         pcall(function() nativePeripheral.call(name, method, unpack(args)) end)
     end
-
-    -- Remote peripherals (Broadcast fire-and-forget)
-    -- wppMulticastCall expects: peripheralName, methodName, args
-    -- Wait, we would have to broadcast to a specific peripheral ID (like "speaker_0"). But multiple computers
-    -- might have different local speaker IDs. 
-    -- We can modify wppMulticastCall to iterate over local peripherals matching the type, rather than an ID!
     sendMessageBroadcast("multicast_function", {func="wppMulticastCallType", args={_type, method, args}})
 end
 
-local _wpp_master_decoder = nil
-function remotePeripheral.multicastCallDFPWM(_type, method, chunk, volume, play_at)
-    log("New multicastCallDFPWM(".. _type ..", ".. method ..")")
-    
-    -- Calculate a global synchronization timestamp if not provided. Give workers 1.5 seconds to decode the chunk.
-    play_at = play_at or ((os.epoch("ingame") / 1000) + 1.5)
-
-    -- Add to local queues so the Master is also synchronized
-    _wpp_pending_decodes = _wpp_pending_decodes or {}
-    table.insert(_wpp_pending_decodes, {type=_type, methodName=method, chunk=chunk, volume=volume, play_at=play_at})
-    os.queueEvent("wpp_decode_next")
-
-    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioDFPWM", args={_type, method, chunk, volume, play_at}})
-end
-
--- Injecting the wppMulticastCallType into wrappedPeripheralApi globally since we just needed it now
-wrappedPeripheralApi.wppMulticastCallType = function(_type, methodName, args)
-    log("Multicast call type(".. _type ..", ".. methodName ..", ".. textutils.serialize(args) ..")")
+-- New Master-Decoding function
+function remotePeripheral.multicastCallPCM(_type, method, pcm_binary, volume, play_at)
+    -- Local playback
+    local buffer = binaryToPcmTable(pcm_binary)
     local locals = {nativePeripheral.find(_type)}
     for _, loc in ipairs(locals) do
         local name = nativePeripheral.getName(loc)
-        pcall(
-            function()
-                nativePeripheral.call(name, methodName, unpack(args))
-            end)
+        audio_queues[name] = audio_queues[name] or {}
+        table.insert(audio_queues[name], {methodName=method, buffer=buffer, volume=volume, play_at=play_at})
     end
+    pumpAudioQueues()
+    
+    -- Remote playback
+    sendMessageBroadcast("multicast_function", {func="wppMulticastPlayAudioPCM", args={_type, method, pcm_binary, volume, play_at}})
 end
-
--- End->New peripheral API using WPP
--- End->Public API Functions
 
 return {wireless=wireless, peripheral=remotePeripheral}
