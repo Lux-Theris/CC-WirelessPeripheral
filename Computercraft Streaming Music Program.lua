@@ -1,7 +1,7 @@
-local wpp = require("wpp")
+-- WPP Bridge Master Client
+-- Baseado no "Computercraft Streaming Music Program" original
 
-wpp.wireless.connect("music")
-
+local CHANNEL_NAME = "music"
 local api_base_url = "https://ipod-2to6magyna-uc.a.run.app/"
 local version = "2.1"
 
@@ -30,10 +30,11 @@ local is_error = false;
 
 local player_handle = nil
 local start = nil
-local pcm = nil
 local size = nil
 local needs_next_chunk = 0
-local buffer
+
+local dfpwm = require("cc.audio.dfpwm")
+local decoder = dfpwm.make_decoder()
 
 -- STARTUP DISCOVERY UI
 term.setBackgroundColor(colors.black)
@@ -41,22 +42,19 @@ term.clear()
 term.setCursorPos(1,1)
 term.setTextColor(colors.white)
 print("--- Music Master (Version ".. version ..") ---")
-print("Iniciando rede WPP...")
-sleep(0.5)
 
-print("Escaneando rede por speakers...")
-local speakers = { wpp.peripheral.find("speaker") }
-
-if #speakers == 0 then
+local bridge = peripheral.find("music_bridge")
+if not bridge then
     term.setTextColor(colors.red)
-    print("\nERRO: Nenhum speaker encontrado!")
-    print("Verifique a rede ou rode update-slaves.lua")
-    error("", 0)
+    print("\nERRO: Periferico 'music_bridge' nao encontrado!")
+    print("Certifique-se que o computador esta encostado no bloco Music Bridge.")
+    return
 end
 
+print("Criando canal '"..CHANNEL_NAME.."'...")
+bridge.createChannel(CHANNEL_NAME)
 term.setTextColor(colors.green)
-print("\n" .. #speakers .. " speakers encontrados!")
-print("Conectando e sincronizando...")
+print("Canal criado com sucesso!")
 sleep(1.5)
 -- END STARTUP DISCOVERY UI
 
@@ -363,10 +361,7 @@ function uiLoop()
 								term.write("Play now")
 								sleep(0.2)
 								in_search_result = false
-								for _, speaker in ipairs(speakers) do
-									speaker.stop()
-									os.queueEvent("playback_stopped")
-								end
+								-- No need to stop speakers, the bridge handles it
 								playing = true
 								is_error = false
 								playing_id = nil
@@ -444,10 +439,6 @@ function uiLoop()
 									end
 									if playing then
 										playing = false
-										for _, speaker in ipairs(speakers) do
-											speaker.stop()
-											os.queueEvent("playback_stopped")
-										end
 										playing_id = nil
 										is_loading = false
 										is_error = false
@@ -477,12 +468,6 @@ function uiLoop()
 										sleep(0.2)
 		
 										is_error = false
-										if playing then
-											for _, speaker in ipairs(speakers) do
-												speaker.stop()
-												os.queueEvent("playback_stopped")
-											end
-										end
 										if #queue > 0 then
 											if looping == 1 then
 												table.insert(queue, now_playing)
@@ -517,13 +502,6 @@ function uiLoop()
 								-- Volume slider
 								if x >= 1 and x < 2 + 24 then
 									volume = (x - 1) / 24 * 3
-
-									-- for _, speaker in ipairs(speakers) do
-									-- 	speaker.stop()
-									-- 	os.queueEvent("playback_stopped")
-									-- end
-									-- playing_id = nil
-									-- os.queueEvent("audio_update")
 								end
 							end
 
@@ -542,13 +520,6 @@ function uiLoop()
 								-- Volume slider
 								if x >= 1 and x < 2 + 24 then
 									volume = (x - 1) / 24 * 3
-
-									-- for _, speaker in ipairs(speakers) do
-									-- 	speaker.stop()
-									-- 	os.queueEvent("playback_stopped")
-									-- end
-									-- playing_id = nil
-									-- os.queueEvent("audio_update")
 								end
 							end
 
@@ -568,10 +539,7 @@ end
 
 
 function audioLoop()
-	local next_chunk_time = nil
 	while true do
-
-		-- AUDIO
 		if playing and now_playing then
 			local thisnowplayingid = now_playing.id
 			if playing_id ~= thisnowplayingid then
@@ -579,7 +547,7 @@ function audioLoop()
 				last_download_url = api_base_url .. "?v=" .. version .. "&id=" .. textutils.urlEncode(playing_id)
 				playing_status = 0
 				needs_next_chunk = 1
-				next_chunk_time = nil
+				decoder = dfpwm.make_decoder() -- Reset decoder for new song
 
 				http.request({url = last_download_url, binary = true})
 				is_loading = true
@@ -587,71 +555,48 @@ function audioLoop()
 				os.queueEvent("redraw_screen")
 				os.queueEvent("audio_update")
 			elseif playing_status == 1 and needs_next_chunk == 1 then
-
-				while true do
-					local chunk = player_handle.read(size)
-					if not chunk then
-						if looping == 2 or (looping == 1 and #queue == 0) then
-							playing_id = nil
-						elseif looping == 1 and #queue > 0 then
-							table.insert(queue, now_playing)
+				local chunk = player_handle.read(size)
+				if not chunk then
+					if looping == 2 or (looping == 1 and #queue == 0) then
+						playing_id = nil
+					elseif looping == 1 and #queue > 0 then
+						table.insert(queue, now_playing)
+						now_playing = queue[1]
+						table.remove(queue, 1)
+						playing_id = nil
+					else
+						if #queue > 0 then
 							now_playing = queue[1]
 							table.remove(queue, 1)
 							playing_id = nil
 						else
-							if #queue > 0 then
-								now_playing = queue[1]
-								table.remove(queue, 1)
-								playing_id = nil
-							else
-								now_playing = nil
-								playing = false
-								playing_id = nil
-								is_loading = false
-								is_error = false
-							end
-						end
-
-						os.queueEvent("redraw_screen")
-
-						player_handle.close()
-						needs_next_chunk = 0
-						break
-					else
-						if start then
-							chunk, start = start .. chunk, nil
-							size = size + 4
-						end
-				
-						local current_time = os.epoch("ingame") / 1000
-						if not next_chunk_time or next_chunk_time < current_time then
-							next_chunk_time = current_time + 1.2 -- Initial lead time
-						end
-				
-						wpp.peripheral.multicastCallDFPWM("speaker", "playAudio", chunk, volume, next_chunk_time)
-						
-						local duration = (string.len(chunk) * 8) / 48000
-						next_chunk_time = next_chunk_time + duration
-
-						-- Sleep until slightly before we need to send the NEXT packet
-						local sleep_time = (next_chunk_time - duration) - (os.epoch("ingame") / 1000) - 0.4
-						
-						if sleep_time > 0 then
-							local timerId = os.startTimer(sleep_time)
-							parallel.waitForAny(
-								function()
-									repeat until select(2, os.pullEvent("timer")) == timerId
-								end,
-								function()
-									os.pullEvent("playback_stopped")
-								end
-							)
-						end
-
-						if not playing or playing_id ~= thisnowplayingid then
-							break
+							now_playing = nil
+							playing = false
+							playing_id = nil
+							is_loading = false
+							is_error = false
 						end
 					end
+
+					os.queueEvent("redraw_screen")
+					player_handle.close()
+					needs_next_chunk = 0
+				else
+					if start then
+						chunk, start = start .. chunk, nil
+						size = size + 4
+					end
+
+					local pcmData = decoder(chunk)
+					local success = bridge.broadcastAudio(pcmData, volume)
+
+                    -- The bridge is synchronous, so we can immediately request the next chunk
+                    -- if the previous one was sent successfully.
+                    if not success then
+                        -- If the broadcast fails, wait for the speaker buffers to clear.
+                        -- This is a fallback, as the bridge should ideally handle this.
+                        os.pullEvent("speaker_audio_empty")
+                    end
 				end
 				os.queueEvent("audio_update")
 			end
@@ -701,11 +646,4 @@ function httpLoop()
 	end
 end
 
-function wppLoop()
-	while true do
-		local event = {os.pullEvent()}
-		wpp.wireless.localEventHandler(event)
-	end
-end
-
-parallel.waitForAny(uiLoop, audioLoop, httpLoop, wppLoop)
+parallel.waitForAny(uiLoop, audioLoop, httpLoop)

@@ -1,45 +1,41 @@
-local MASTER_URL = "https://raw.githubusercontent.com/Lux-Theris/CC-WirelessPeripheral/refs/heads/main/wpp.lua"
-local WPP_PATH = "wpp.lua"
-local CANAL = 65535 
+-- WPP Bridge Slave Client
+-- Conecta o speaker local ao canal de música global
 
-local modem = peripheral.find("modem")
-if modem then modem.open(CANAL) end
+local CHANNEL_NAME = "music"
 
-local function updateWpp()
-    local response = http.get(MASTER_URL)
-    if response then
-        local f = fs.open(WPP_PATH, "w")
-        f.write(response.readAll())
-        f.close()
-        response.close()
-        -- Confirma que terminou a atualização
-        if modem then modem.transmit(CANAL, CANAL, "UPDATE_OK:" .. os.getComputerID()) end
-        return true
-    end
-    return false
+term.clear()
+term.setCursorPos(1,1)
+print("--- Music Slave Client ---")
+
+-- 1. Encontrar o periférico Music Bridge
+local bridge = peripheral.find("music_bridge")
+if not bridge then
+    term.setTextColor(colors.red)
+    print("ERRO: Periferico 'music_bridge' nao encontrado!")
+    print("Certifique-se que o computador esta encostado no bloco Music Bridge.")
+    return
 end
 
--- Tenta atualizar ao ligar (importante para novos PCs na rede)
--- updateWpp() -- Removido do startup direto para evitar loops de reboot infinito. O master controla o update via REBOOT_ALL.
-
-local wpp = require("wpp")
-wpp.wireless.host("music")
-
-while true do
-    local event = {os.pullEvent()}
-    if event[1] == "modem_message" then
-        local msg = event[5]
-        
-        -- Responde ao Master para ser contado na rede
-        if msg == "PING_NETWORK" then
-            modem.transmit(CANAL, CANAL, "PONG:" .. os.getComputerID())
-            
-        -- Ordem de reiniciar e atualizar
-        elseif msg == "REBOOT_ALL" then
-            sleep(math.random(1, 3))
-            updateWpp()
-            os.reboot()
-        end
-    end
-    wpp.wireless.localEventHandler(event)
+-- 2. Encontrar o Speaker
+local speaker = peripheral.find("speaker")
+if not speaker then
+    term.setTextColor(colors.red)
+    print("ERRO: Nenhum 'speaker' encontrado!")
+    return
 end
+
+-- 3. Conectar ao canal
+print("Conectando ao canal '"..CHANNEL_NAME.."'...")
+bridge.joinChannel(CHANNEL_NAME, speaker)
+
+term.setTextColor(colors.green)
+print("Sucesso! Conectado e aguardando audio.")
+print("Speaker: " .. peripheral.getName(speaker))
+
+-- Loop simples para manter o programa rodando e permitir reinicialização fácil
+print("\nPressione qualquer tecla para sair/reiniciar.")
+os.pullEvent("key")
+
+-- Ao sair, é boa prática desconectar, embora o mod deva lidar com desconexões
+bridge.leaveChannel(CHANNEL_NAME, speaker)
+print("Desconectado.")
